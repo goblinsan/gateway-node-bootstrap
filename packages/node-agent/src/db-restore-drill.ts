@@ -56,8 +56,17 @@ function buildRestoreEnv(): NodeJS.ProcessEnv {
 }
 
 /** Runs a psql command against the given environment and returns stdout. */
-function psql(sql: string, env: NodeJS.ProcessEnv): string {
-  const result = execFileSync('psql', ['--no-psqlrc', '--tuples-only', '--command', sql], {
+function psql(sql: string, env: NodeJS.ProcessEnv, vars?: Record<string, string>): string {
+  const args = ['--no-psqlrc', '--tuples-only', '--command', sql];
+  // Append each named variable as a safe --variable=name=value argument so
+  // callers can reference :name or :'name' inside the SQL without string
+  // interpolation (prevents SQL injection).
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) {
+      args.push(`--variable=${k}=${v}`);
+    }
+  }
+  const result = execFileSync('psql', args, {
     env,
     encoding: 'utf-8',
   });
@@ -93,9 +102,10 @@ async function runDrill(): Promise<DrillReport> {
   const sourceEnv = process.env as NodeJS.ProcessEnv;
   psql(
     `INSERT INTO gateway_sensitive.audit_log (actor, event_type, node_id, detail)
-     VALUES ('restore-drill', 'drill.canary', '${canaryId}',
-             '{"canary": true, "drillId": "${canaryId}"}')`,
-    sourceEnv
+     VALUES ('restore-drill', 'drill.canary', :'canary_id',
+             jsonb_build_object('canary', true, 'drillId', :'canary_id'))`,
+    sourceEnv,
+    { canary_id: canaryId }
   );
   notes.push('Canary row inserted into source gateway_sensitive.audit_log');
 
@@ -139,8 +149,9 @@ async function runDrill(): Promise<DrillReport> {
   console.log('[drill] Phase 4: verifying canary row in restore target');
   const count = psql(
     `SELECT count(*) FROM gateway_sensitive.audit_log
-     WHERE node_id = '${canaryId}' AND event_type = 'drill.canary'`,
-    restoreEnv
+     WHERE node_id = :'canary_id' AND event_type = 'drill.canary'`,
+    restoreEnv,
+    { canary_id: canaryId }
   );
   const verificationPassed = count === '1';
 
