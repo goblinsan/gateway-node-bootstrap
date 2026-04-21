@@ -1,0 +1,42 @@
+{
+  "_comment": "Minimum viable recovery profile for an edge-gateway node. Replace every REPLACE-* placeholder with real values before uploading to S3.",
+  "manifestVersion": "1",
+  "role": "edge-gateway",
+  "profileName": "Edge Gateway — Minimal Viable Profile",
+  "revision": "1",
+
+  "runtimePackages": [
+    { "name": "curl", "minVersion": "7.0.0" },
+    { "name": "netcat-openbsd" }
+  ],
+
+  "composeBundles": [
+    {
+      "name": "gateway-core",
+      "sourceUri": "s3://REPLACE-BUCKET-NAME/profiles/edge-gateway/docker-compose.yml",
+      "sha256": "REPLACE-WITH-SHA256-OF-COMPOSE-FILE",
+      "images": [
+        "REPLACE-REGISTRY/gateway-core:REPLACE-TAG-OR-DIGEST"
+      ],
+      "secretRefs": [
+        "/gateway/production/vpn-psk"
+      ]
+    }
+  ],
+
+  "systemdUnits": [],
+
+  "healthChecks": [
+    {
+      "type": "compose-service",
+      "bundle": "gateway-core",
+      "service": "gateway"
+    },
+    {
+      "type": "http",
+      "url": "http://localhost:8080/health",
+      "expectedStatus": 200,
+      "timeoutSeconds": 10
+    }
+  ]
+}
