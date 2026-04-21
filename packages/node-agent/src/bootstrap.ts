@@ -109,6 +109,69 @@ function computeManifestDiff(
 }
 
 /**
+ * Checks preconditions before beginning bootstrap.  Emits warnings for
+ * operator-correctable issues (non-root, missing env vars) rather than
+ * hard-failing, so that the log output is maximally helpful when diagnosing
+ * a first-run failure.
+ */
+function preFlightCheck(): void {
+  // Root check — package installation, Docker, and systemd all require root.
+  if (
+    process.platform === 'linux' &&
+    typeof process.getuid === 'function' &&
+    process.getuid() !== 0
+  ) {
+    console.warn(
+      '[bootstrap] WARNING: not running as root. Package installation, Docker, ' +
+        'and systemd operations will likely fail. Re-run with: sudo -E node dist/index.js'
+    );
+  }
+
+  // Log the active environment so operators can quickly see the bootstrap mode.
+  const controlServiceUrl = process.env.GATEWAY_CONTROL_SERVICE_URL;
+  const enrollmentToken = process.env.GATEWAY_ENROLLMENT_TOKEN;
+  const instanceId = process.env.GATEWAY_INSTANCE_ID;
+  console.log('[bootstrap] Pre-flight environment check:');
+  console.log(
+    `  GATEWAY_CONTROL_SERVICE_URL: ${
+      controlServiceUrl ?? '(not set -- will read manifest URI from SSM directly)'
+    }`
+  );
+  console.log(
+    `  GATEWAY_ENROLLMENT_TOKEN:    ${enrollmentToken ? '(set)' : '(not set -- SSM direct-access mode)'}`
+  );
+  console.log(
+    `  GATEWAY_INSTANCE_ID:         ${instanceId ?? '(not set -- will derive from IMDS)'}`
+  );
+}
+
+/**
+ * Validates cross-references within the manifest (e.g. health checks that
+ * reference compose bundles or systemd units that do not exist in this
+ * manifest).  Throws if any reference is unresolvable so the operator learns
+ * early rather than at the health-check stage.
+ */
+function validateManifest(manifest: NodeManifest): void {
+  const bundleNames = new Set(manifest.composeBundles.map((b) => b.name));
+  const unitNames = new Set(manifest.systemdUnits.map((u) => u.unitName));
+
+  for (const check of manifest.healthChecks) {
+    if (check.type === 'compose-service' && !bundleNames.has(check.bundle)) {
+      throw new Error(
+        `Manifest validation error: health check references unknown compose bundle '${check.bundle}'. ` +
+          `Defined bundles: ${[...bundleNames].join(', ') || '(none)'}`
+      );
+    }
+    if (check.type === 'systemd-unit' && !unitNames.has(check.unitName)) {
+      throw new Error(
+        `Manifest validation error: health check references unknown systemd unit '${check.unitName}'. ` +
+          `Defined units: ${[...unitNames].join(', ') || '(none)'}`
+      );
+    }
+  }
+}
+
+/**
  * Derives the EC2 instance ID.  Prefers the GATEWAY_INSTANCE_ID environment
  * variable (useful in non-EC2 environments or tests).  Falls back to the
  * IMDSv2 metadata endpoint.  Returns undefined if neither is available.
@@ -482,9 +545,8 @@ async function applySystemdUnit(
 
   const dest = `/etc/systemd/system/${unit.unitName}`;
   fs.writeFileSync(dest, raw);
-  execSync(`systemctl daemon-reload && systemctl enable --now ${unit.unitName}`, {
-    stdio: 'inherit',
-  });
+  execFileSync('systemctl', ['daemon-reload'], { stdio: 'inherit' });
+  execFileSync('systemctl', ['enable', '--now', unit.unitName], { stdio: 'inherit' });
 }
 
 /** Runs health checks and returns a list of failures. */
@@ -514,9 +576,13 @@ async function runHealthChecks(
         }
         case 'tcp': {
           // Use netcat as a simple TCP probe
-          execSync(
-            `nc -z -w ${check.timeoutSeconds ?? 5} ${check.host} ${check.port}`
-          );
+          execFileSync('nc', [
+            '-z',
+            '-w',
+            String(check.timeoutSeconds ?? 5),
+            check.host,
+            String(check.port),
+          ]);
           break;
         }
         case 'compose-service': {
@@ -532,7 +598,7 @@ async function runHealthChecks(
           break;
         }
         case 'systemd-unit': {
-          execSync(`systemctl is-active --quiet ${check.unitName}`);
+          execFileSync('systemctl', ['is-active', '--quiet', check.unitName]);
           break;
         }
       }
@@ -547,6 +613,9 @@ async function runHealthChecks(
 /** Main bootstrap entrypoint. */
 export async function bootstrap(): Promise<void> {
   console.log('[bootstrap] Starting gateway-node bootstrap agent');
+
+  // 0. Pre-flight checks — validates environment and warns on common misconfigurations.
+  preFlightCheck();
 
   const controlServiceUrl = getControlServiceUrl();
   const enrollmentToken = process.env.GATEWAY_ENROLLMENT_TOKEN;
@@ -589,6 +658,9 @@ export async function bootstrap(): Promise<void> {
         `Supported: ${SUPPORTED_MANIFEST_VERSIONS.join(', ')}`
     );
   }
+
+  // 3a. Validate manifest internal cross-references
+  validateManifest(manifest);
 
   console.log(
     `[bootstrap] Applying manifest: role=${manifest.role} ` +

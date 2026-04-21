@@ -135,6 +135,9 @@ The agent:
 
 ## Key documents
 
+- [`docs/recovery-runbook.md`](docs/recovery-runbook.md) — **start here for
+  fresh-node recovery**: step-by-step procedure, timing estimates, and known
+  manual gaps.
 - [`docs/aws-setup.md`](docs/aws-setup.md) — operator guide: deploying the
   stack, uploading manifests, enrolling nodes, and revoking access.
 - [`docs/enrollment-trust-model.md`](docs/enrollment-trust-model.md) — how
@@ -142,6 +145,8 @@ The agent:
   a compromised node is contained.
 - [`docs/source-plan.md`](docs/source-plan.md) — the full implementation
   plan, phased roadmap, and delegation notes for Copilot.
+- [`docs/profiles/edge-gateway-minimal.json`](docs/profiles/edge-gateway-minimal.json) —
+  reference manifest for the minimum viable edge-gateway profile.
 
 ---
 

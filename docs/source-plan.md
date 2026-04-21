@@ -90,13 +90,41 @@ gateway-node-bootstrap/
 - [ ] Node agent: expose `GET /status` endpoint returning current revision and
       health check results
 
-### Phase 3 — Hardening and observability
+### Phase 2 — Recovery drill (Issues #18–#21)
+
+- [x] Define minimum viable recovered node profile
+      (`docs/profiles/edge-gateway-minimal.json`) — demonstrates enrollment,
+      secret retrieval, container startup, and health reporting
+- [x] Node agent: pre-flight check — warns when not running as root and logs
+      active environment configuration before touching anything
+- [x] Node agent: manifest cross-reference validation — catches health checks
+      that reference undefined compose bundles or systemd units before
+      applying any changes
+- [x] Node agent: security hardening — replaced shell-interpolated `execSync`
+      calls with `execFileSync` for `systemctl` and `nc` to eliminate injection
+      risk from manifest-supplied values
+- [x] Recovery runbook: step-by-step fresh-node bootstrap guide
+      (`docs/recovery-runbook.md`), including timing estimates and the top
+      remaining manual gaps (Issues #19, #20, #21)
+
+### Phase 3 — Drift detection
+
+- [ ] Cron job or EventBridge rule on the control service that periodically
+      compares a node's `last-applied-revision` (from DynamoDB) against the
+      current manifest revision
+- [ ] Alert (SNS or PagerDuty) when a node's revision is stale beyond a
+      configurable threshold
+- [ ] Node agent: expose `GET /status` endpoint returning current revision and
+      health check results
+
+### Phase 4 — Hardening and observability
 
 - [ ] CloudWatch metrics: bootstrap duration, health check pass/fail counts
 - [ ] OCI image digest pinning enforced at bootstrap time (reject manifests
       with mutable tags)
 - [ ] Enrollment token revocation endpoint
-- [ ] Runbook: how to recover a node from scratch using this system
+- [ ] AMI or user-data automation for Node.js and agent installation
+      (eliminates the largest manual gap from the recovery drill)
 
 ---
 
