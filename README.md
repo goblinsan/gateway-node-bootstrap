@@ -119,13 +119,17 @@ sudo node dist/index.js   # reads manifest URI from SSM directly
 
 The agent:
 
-1. Reads the manifest S3 URI from SSM Parameter Store
-2. Downloads and parses the `NodeManifest` JSON
-3. Installs required system packages
-4. Applies Docker Compose bundles (with SHA-256 verification)
-5. Installs and enables systemd units (with SHA-256 verification)
-6. Runs all declared health checks
-7. Exits 0 on success, 1 on any failure
+1. Reads the manifest S3 URI (via enrollment token → control service, or directly from SSM)
+2. Downloads and parses the `NodeManifest` JSON (with SHA-256 verification)
+3. Compares the incoming revision against the last-applied state (`/opt/gateway/.bootstrap-state.json`) and reports what changed
+4. Provisions the host — installs Docker CE and the Compose plugin if not already present (Debian/Ubuntu only)
+5. Installs required system packages (skips packages already meeting the minimum version)
+6. Applies Docker Compose bundles: fetches and verifies the compose file, resolves `secretRefs` from AWS Secrets Manager into a mode-0600 `.env` file, pulls pinned images, and runs `docker compose up -d --remove-orphans`
+7. Installs and enables systemd units (with SHA-256 verification)
+8. Runs all declared health checks
+9. Reports a heartbeat to the control service (status: `healthy`, `degraded`, or `failed`)
+10. Saves the applied state for idempotent re-runs
+11. Exits 0 on success, 1 on any failure
 
 ---
 
