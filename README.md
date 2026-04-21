@@ -138,11 +138,20 @@ The agent:
 - [`docs/recovery-runbook.md`](docs/recovery-runbook.md) — **start here for
   fresh-node recovery**: step-by-step procedure, timing estimates, and known
   manual gaps.
+- [`docs/operator-runbook.md`](docs/operator-runbook.md) — **operator quick-reference**:
+  enrollment, bootstrap, backup checks, restore drill, node revocation, and
+  failure escalation in one place.
 - [`docs/aws-setup.md`](docs/aws-setup.md) — operator guide: deploying the
   stack, uploading manifests, enrolling nodes, and revoking access.
+- [`docs/db-backup-restore.md`](docs/db-backup-restore.md) — backup job setup,
+  restore procedure, end-to-end drill, and backup monitoring.
 - [`docs/enrollment-trust-model.md`](docs/enrollment-trust-model.md) — how
   nodes prove they are allowed to enroll, how secrets are retrieved, and how
   a compromised node is contained.
+- [`docs/weekly-checklist.md`](docs/weekly-checklist.md) — weekly execution
+  checklist: recovery milestone, open risks, and highest-leverage actions.
+- [`docs/coach-summary.md`](docs/coach-summary.md) — coach-facing project
+  status format: phase, blocker, next action, and recovery confidence.
 - [`docs/source-plan.md`](docs/source-plan.md) — the full implementation
   plan, phased roadmap, and delegation notes for Copilot.
 - [`docs/profiles/edge-gateway-minimal.json`](docs/profiles/edge-gateway-minimal.json) —
