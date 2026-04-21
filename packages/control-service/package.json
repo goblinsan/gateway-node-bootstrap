@@ -1,0 +1,21 @@
+{
+  "name": "@gateway-node-bootstrap/control-service",
+  "version": "0.1.0",
+  "description": "AWS CDK app and control-plane HTTP service for gateway-node-bootstrap",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist cdk.out",
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "@gateway-node-bootstrap/manifest-types": "*",
+    "aws-cdk-lib": "^2.139.0",
+    "constructs": "^10.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.139.0",
+    "typescript": "*"
+  }
+}

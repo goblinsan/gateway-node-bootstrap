@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/manifest-types" },
+    { "path": "packages/control-service" },
+    { "path": "packages/node-agent" }
+  ]
+}
