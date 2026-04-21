@@ -1,0 +1,12 @@
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+cdk.out/
+**/cdk.out/
+*.js.map
+*.d.ts
+*.tsbuildinfo
+.env
+.env.*
+*.log

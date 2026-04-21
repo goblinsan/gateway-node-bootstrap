@@ -1,0 +1,14 @@
+{
+  "name": "@gateway-node-bootstrap/manifest-types",
+  "version": "0.1.0",
+  "description": "Shared TypeScript types for the node desired-state manifest",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "*"
+  }
+}

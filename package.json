@@ -1,0 +1,24 @@
+{
+  "name": "gateway-node-bootstrap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bootstrap foundation for repeatable gateway-node recovery",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "eslint 'packages/*/src/**/*.ts'",
+    "clean": "npm run clean --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
