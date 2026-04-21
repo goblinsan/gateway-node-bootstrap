@@ -68,11 +68,27 @@ The stack provisions:
 | Resource | Purpose |
 |---|---|
 | S3 bucket | Stores compose bundles, unit files, and manifest snapshots |
-| DynamoDB table | Records node enrollment state and applied revisions |
+| DynamoDB table | Records node enrollment state, heartbeat, and applied revisions |
 | SSM Parameter | Holds the S3 URI of the current desired-state manifest |
-| KMS key | Encrypts all resources and signs enrollment tokens |
+| KMS key | Encrypts all resources; used to protect enrollment secrets |
 | Secrets Manager secret | Placeholder demonstrating the `SecretRef` naming convention |
 | IAM role `gateway-node-agent` | Assumed by nodes; grants minimal read access |
+| Lambda × 4 | `enroll`, `activate`, `manifest`, `heartbeat` handlers |
+| API Gateway | REST API at `https://<id>.execute-api.<region>.amazonaws.com/v1/` |
+
+See [`docs/aws-setup.md`](docs/aws-setup.md) for the complete operator guide,
+including how to upload the initial manifest and manage enrollment tokens.
+
+---
+
+## Control service API
+
+| Method | Path | Actor | Description |
+|---|---|---|---|
+| `POST` | `/v1/enroll` | Operator | Creates a pending enrollment and returns a 60-minute single-use token |
+| `POST` | `/v1/activate` | Node agent | Validates token, marks node active, returns manifest S3 URI |
+| `GET` | `/v1/manifest?instanceId=…` | Node agent | Returns the current `NodeManifest` JSON for an enrolled node |
+| `POST` | `/v1/heartbeat` | Node agent | Records last-applied revision and bootstrap status |
 
 ---
 
@@ -85,6 +101,20 @@ the `gateway-node-agent` IAM instance profile attached.
 cd packages/node-agent
 npm run build
 sudo node dist/index.js
+```
+
+### With enrollment token (recommended for new nodes)
+
+```bash
+export GATEWAY_CONTROL_SERVICE_URL="https://<id>.execute-api.<region>.amazonaws.com"
+export GATEWAY_ENROLLMENT_TOKEN="<token from POST /v1/enroll>"
+sudo -E node dist/index.js
+```
+
+### Direct SSM mode (no enrollment token)
+
+```bash
+sudo node dist/index.js   # reads manifest URI from SSM directly
 ```
 
 The agent:
@@ -101,6 +131,8 @@ The agent:
 
 ## Key documents
 
+- [`docs/aws-setup.md`](docs/aws-setup.md) — operator guide: deploying the
+  stack, uploading manifests, enrolling nodes, and revoking access.
 - [`docs/enrollment-trust-model.md`](docs/enrollment-trust-model.md) — how
   nodes prove they are allowed to enroll, how secrets are retrieved, and how
   a compromised node is contained.

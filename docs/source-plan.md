@@ -56,18 +56,21 @@ gateway-node-bootstrap/
 
 ### Phase 1 — Minimal viable recovery
 
-- [ ] Control-service HTTP endpoint: `POST /enroll` — issues a signed
-      enrollment token for a given instance-id
-- [ ] Control-service HTTP endpoint: `POST /activate` — validates the token
-      and returns the manifest S3 URI
+- [x] Control-service HTTP endpoint: `POST /v1/enroll` — issues a single-use
+      enrollment token for a given instance-id (stored as SHA-256 hash in DynamoDB)
+- [x] Control-service HTTP endpoint: `POST /v1/activate` — validates the token
+      and returns the manifest S3 URI; marks enrollment active (single-use)
+- [x] Control-service HTTP endpoint: `GET /v1/manifest` — returns the current
+      `NodeManifest` JSON for an actively enrolled node
+- [x] Control-service HTTP endpoint: `POST /v1/heartbeat` — records the node's
+      last-applied revision and bootstrap status in DynamoDB
+- [x] API Gateway REST API (stage `v1`) wiring all four Lambda handlers
+- [x] Node agent: enrollment flow via `GATEWAY_ENROLLMENT_TOKEN` +
+      `GATEWAY_CONTROL_SERVICE_URL` environment variables
+- [x] Node agent: heartbeat reporting after successful (or degraded) bootstrap
+- [x] Operator docs: `docs/aws-setup.md` covering deploy, enrollment, revocation
 - [ ] Node agent: implement `apt-get` package installation with idempotency
       checks (skip already-installed packages)
-- [ ] Node agent: implement Docker Compose bundle apply with SHA-256
-      verification
-- [ ] Node agent: implement health check runner (HTTP and compose-service
-      checks at minimum)
-- [ ] Node agent: write `last-applied-revision` file after successful
-      bootstrap so re-runs are idempotent
 - [ ] End-to-end test: stand up a local Ubuntu container and run the agent
       against a sample manifest; verify health checks pass within 60 minutes
 
@@ -110,11 +113,13 @@ the full TypeScript definition.  The essential fields are:
 
 ### Enrollment flow
 
-See `docs/enrollment-trust-model.md` for the full trust model.  Short form:
+See `docs/enrollment-trust-model.md` and `docs/aws-setup.md` for the full
+trust model and deployment steps.  Short form:
 
-1. Operator calls `POST /enroll` → receives a short-lived, KMS-signed token
+1. Operator calls `POST /v1/enroll` → receives a short-lived, single-use token
 2. Token is passed to the node (e.g. via EC2 user-data or secure channel)
-3. Node agent calls `POST /activate` → receives manifest URI, begins bootstrap
+3. Node agent calls `POST /v1/activate` → receives manifest URI, begins bootstrap
+4. Node agent reports `POST /v1/heartbeat` after bootstrap completes
 
 ---
 

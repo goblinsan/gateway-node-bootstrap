@@ -9,8 +9,102 @@ import * as path from 'path';
 const SSM_MANIFEST_PARAM = '/gateway/bootstrap/manifest-s3-uri';
 const SUPPORTED_MANIFEST_VERSIONS: NodeManifest['manifestVersion'][] = ['1'];
 
-/** Fetches the manifest S3 URI from SSM Parameter Store. */
-async function resolveManifestUri(): Promise<string> {
+/**
+ * Returns the control service base URL from the environment, or undefined if
+ * not configured.  Trailing slashes are stripped.
+ */
+function getControlServiceUrl(): string | undefined {
+  return process.env.GATEWAY_CONTROL_SERVICE_URL?.replace(/\/$/, '');
+}
+
+/**
+ * Derives the EC2 instance ID.  Prefers the GATEWAY_INSTANCE_ID environment
+ * variable (useful in non-EC2 environments or tests).  Falls back to the
+ * IMDSv2 metadata endpoint.  Returns undefined if neither is available.
+ */
+async function resolveInstanceId(): Promise<string | undefined> {
+  if (process.env.GATEWAY_INSTANCE_ID) {
+    return process.env.GATEWAY_INSTANCE_ID;
+  }
+  try {
+    // IMDSv2: first obtain a session token, then fetch the instance-id
+    const tokenResp = await fetch('http://169.254.169.254/latest/api/token', {
+      method: 'PUT',
+      headers: { 'X-aws-ec2-metadata-token-ttl-seconds': '21600' },
+      signal: AbortSignal.timeout(2000),
+    });
+    const imdsToken = await tokenResp.text();
+    const idResp = await fetch(
+      'http://169.254.169.254/latest/meta-data/instance-id',
+      {
+        headers: { 'X-aws-ec2-metadata-token': imdsToken },
+        signal: AbortSignal.timeout(2000),
+      }
+    );
+    return await idResp.text();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Calls POST /activate on the control service to exchange an enrollment token
+ * for the manifest S3 URI.  Returns the manifest URI on success.
+ */
+async function activateEnrollment(
+  controlServiceUrl: string,
+  instanceId: string,
+  enrollmentToken: string
+): Promise<string> {
+  const resp = await fetch(`${controlServiceUrl}/v1/activate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instanceId, token: enrollmentToken }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`POST /activate failed (${resp.status}): ${body}`);
+  }
+  const data = (await resp.json()) as { manifestUri: string };
+  return data.manifestUri;
+}
+
+/**
+ * Reports a heartbeat to the control service.  Failures are logged but do not
+ * abort the bootstrap process.
+ */
+async function reportHeartbeat(
+  controlServiceUrl: string,
+  instanceId: string,
+  revision: string,
+  bootstrapStatus: 'healthy' | 'degraded' | 'failed',
+  healthCheckResults: Array<{ name: string; passed: boolean; detail?: string }>
+): Promise<void> {
+  try {
+    const resp = await fetch(`${controlServiceUrl}/v1/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instanceId,
+        revision,
+        bootstrapStatus,
+        healthChecks: healthCheckResults,
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      console.warn(`[bootstrap] Heartbeat rejected (${resp.status}): ${body}`);
+    } else {
+      console.log(`[bootstrap] Heartbeat accepted (status=${bootstrapStatus})`);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[bootstrap] Failed to send heartbeat: ${msg}`);
+  }
+}
+
+/** Fetches the manifest S3 URI from SSM Parameter Store (direct-access path). */
+async function resolveManifestUriFromSsm(): Promise<string> {
   const ssm = new SSMClient({});
   const resp = await ssm.send(
     new GetParameterCommand({ Name: SSM_MANIFEST_PARAM })
@@ -150,9 +244,35 @@ async function runHealthChecks(
 export async function bootstrap(): Promise<void> {
   console.log('[bootstrap] Starting gateway-node bootstrap agent');
 
-  // 1. Fetch manifest URI from SSM
-  const manifestUri = await resolveManifestUri();
-  console.log(`[bootstrap] Manifest URI: ${manifestUri}`);
+  const controlServiceUrl = getControlServiceUrl();
+  const enrollmentToken = process.env.GATEWAY_ENROLLMENT_TOKEN;
+
+  // 1. Resolve the manifest URI.
+  //    If an enrollment token is provided, activate through the control service.
+  //    Otherwise fall back to reading the SSM parameter directly.
+  let manifestUri: string;
+  let instanceId: string | undefined;
+
+  if (enrollmentToken && controlServiceUrl) {
+    instanceId = await resolveInstanceId();
+    if (!instanceId) {
+      throw new Error(
+        'GATEWAY_ENROLLMENT_TOKEN is set but instance ID could not be determined. ' +
+          'Set GATEWAY_INSTANCE_ID or run on an EC2 instance with IMDS enabled.'
+      );
+    }
+    console.log(`[bootstrap] Activating enrollment for instance ${instanceId}`);
+    manifestUri = await activateEnrollment(controlServiceUrl, instanceId, enrollmentToken);
+    console.log(`[bootstrap] Activation successful. Manifest URI: ${manifestUri}`);
+  } else {
+    console.log('[bootstrap] No enrollment token provided; reading manifest URI from SSM');
+    manifestUri = await resolveManifestUriFromSsm();
+    console.log(`[bootstrap] Manifest URI: ${manifestUri}`);
+    // Attempt to derive the instance ID for heartbeat reporting even without enrollment
+    if (controlServiceUrl) {
+      instanceId = await resolveInstanceId();
+    }
+  }
 
   // 2. Download and parse manifest
   const raw = await fetchFromS3(manifestUri);
@@ -186,6 +306,22 @@ export async function bootstrap(): Promise<void> {
 
   // 7. Run health checks
   const failures = await runHealthChecks(manifest.healthChecks);
+
+  // 8. Report heartbeat if the control service is configured
+  if (controlServiceUrl && instanceId) {
+    const healthCheckResults = manifest.healthChecks.map((check, i) => ({
+      name: `${check.type}-${i}`,
+      passed: !failures.some((f) => f.includes(check.type)),
+    }));
+    await reportHeartbeat(
+      controlServiceUrl,
+      instanceId,
+      manifest.revision,
+      failures.length === 0 ? 'healthy' : 'degraded',
+      healthCheckResults
+    );
+  }
+
   if (failures.length > 0) {
     throw new Error(
       `[bootstrap] Bootstrap completed with health check failures:\n` +
