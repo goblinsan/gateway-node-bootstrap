@@ -149,6 +149,23 @@ gateway-node-bootstrap/
 
 ---
 
+### Phase 6 — Operator handoff and coach-facing execution loop (Issues #29–#31) ✅
+
+- [x] #29: Operator runbook (`docs/operator-runbook.md`)
+      — concise single-document quick-reference covering enrollment, bootstrap,
+        backup checks, restore drill, node revocation, and failure escalation;
+        uses placeholders throughout; sensitive specifics kept in encrypted ops notes
+- [x] #30: Weekly execution checklist (`docs/weekly-checklist.md`)
+      — lightweight template covering the current recovery milestone, a backup
+        health spot-check, open risks, and the one or two highest-leverage actions
+        for the week; designed to take 10–15 minutes to complete
+- [x] #31: Coach-facing summary format (`docs/coach-summary.md`)
+      — four-field status block (phase, blocker, next action, recovery confidence)
+        that can be pasted directly into a coach session; includes confidence scale
+        and a four-entry history table for trend tracking
+
+---
+
 ## Key contracts
 
 ### NodeManifest (schema version 1)
