@@ -126,6 +126,27 @@ gateway-node-bootstrap/
 - [ ] AMI or user-data automation for Node.js and agent installation
       (eliminates the largest manual gap from the recovery drill)
 
+### Phase 5 — Encrypted backup and restore (Issues #23–#27) ✅
+
+- [x] #23: Postgres schema and role model for sensitive state
+      (`db/migrations/001_sensitive_state_schema.sql`)
+      — `gateway_sensitive` schema, four least-privilege roles, application-layer
+        AES-256-GCM encryption for sensitive fields, append-only `audit_log`
+- [x] #24: Encrypted Postgres backup job (`packages/node-agent/src/db-backup.ts`)
+      — `pg_dump → KMS GenerateDataKey → AES-256-GCM encrypt → S3 upload`
+        with SSE-KMS, 90-day lifecycle, and CloudWatch metric emission
+- [x] #25: Restore workflow (`packages/node-agent/src/db-restore.ts`,
+      `docs/db-backup-restore.md`)
+      — downloads from S3, KMS-decrypts DEK, AES-256-GCM decrypts dump,
+        verifies SHA-256 integrity, runs pg_restore
+- [x] #26: Backup monitoring and missing-backup alert
+      — CloudWatch alarm `gateway-db-backup-missing` (treat-missing-data=BREACHING,
+        25-hour window); SNS topic `gateway-db-backup-alerts`; CDK stack outputs
+        `BackupAlertTopicArn`
+- [x] #27: End-to-end restore drill (`packages/node-agent/src/db-restore-drill.ts`)
+      — inserts canary row, takes real backup, restores into target DB, verifies
+        canary row; reports timing and SHA-256 integrity
+
 ---
 
 ## Key contracts

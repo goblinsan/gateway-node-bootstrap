@@ -9,6 +9,9 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambda_nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { Construct } from 'constructs';
 
 /**
@@ -23,6 +26,8 @@ import { Construct } from 'constructs';
  *   - IAM role:         node-agent assume-role, grants minimal S3/SSM/Secrets read
  *   - Lambda functions: enroll, activate, manifest, heartbeat handlers
  *   - API Gateway:      REST API exposing the four Lambda functions
+ *   - CloudWatch alarm: fires when no successful DB backup is received in 25 hours
+ *   - SNS topic:        backup-alert channel; subscribe an email/PagerDuty endpoint
  */
 export class BootstrapStack extends cdk.Stack {
   public readonly artifactBucket: s3.Bucket;
@@ -53,6 +58,16 @@ export class BootstrapStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        {
+          // Expire old backup objects after 90 days; keep the last 30 non-current
+          // versions to support point-in-time restore.
+          id: 'ExpireOldBackups',
+          prefix: 'backups/',
+          expiration: cdk.Duration.days(90),
+          noncurrentVersionExpiration: cdk.Duration.days(30),
+        },
+      ],
     });
 
     // -----------------------------------------------------------------------
@@ -127,6 +142,31 @@ export class BootstrapStack extends cdk.Stack {
       sid: 'UseBootstrapKey',
       actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
       resources: [bootstrapKey.keyArn],
+    }));
+
+    // Backup permissions — allow the node agent to write encrypted backups to
+    // the artifact bucket and to list the backup prefix for restore discovery.
+    this.nodeAgentRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'WriteEncryptedBackups',
+      actions: ['s3:PutObject'],
+      resources: [`${this.artifactBucket.bucketArn}/backups/*`],
+    }));
+
+    this.nodeAgentRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ListBackupObjects',
+      actions: ['s3:ListBucket'],
+      resources: [this.artifactBucket.bucketArn],
+      conditions: { StringLike: { 's3:prefix': ['backups/*'] } },
+    }));
+
+    // Allow the node agent to emit backup outcome metrics to CloudWatch.
+    this.nodeAgentRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'EmitBackupMetrics',
+      actions: ['cloudwatch:PutMetricData'],
+      resources: ['*'],
+      conditions: {
+        StringEquals: { 'cloudwatch:namespace': 'GatewayNodeBootstrap/DBBackup' },
+      },
     }));
 
     // -----------------------------------------------------------------------
@@ -223,8 +263,56 @@ export class BootstrapStack extends cdk.Stack {
     heartbeatResource.addMethod('POST', new apigw.LambdaIntegration(heartbeatFn));
 
     // -----------------------------------------------------------------------
+    // Backup monitoring — SNS topic + CloudWatch alarm (Issues #26)
+    //
+    // The node-agent backup job emits a "BackupSuccess" metric to the
+    // GatewayNodeBootstrap/DBBackup namespace on every backup run (1=success,
+    // 0=failure).  The alarm fires when the SUM over a 25-hour window is < 1
+    // OR when no data is reported at all (treat-missing-data=breaching), which
+    // catches both hard failures and silently broken cron jobs.
+    //
+    // To receive alerts, subscribe an email address or PagerDuty endpoint to
+    // the BackupAlertTopic SNS topic after deploying the stack:
+    //   aws sns subscribe \
+    //     --topic-arn <BackupAlertTopicArn output> \
+    //     --protocol email \
+    //     --notification-endpoint ops@example.com
+    // -----------------------------------------------------------------------
+    const backupAlertTopic = new sns.Topic(this, 'BackupAlertTopic', {
+      topicName: 'gateway-db-backup-alerts',
+      displayName: 'Gateway DB Backup Alerts',
+      masterKey: bootstrapKey,
+    });
+
+    const backupSuccessMetric = new cloudwatch.Metric({
+      namespace: 'GatewayNodeBootstrap/DBBackup',
+      metricName: 'BackupSuccess',
+      dimensionsMap: { Schema: 'gateway_sensitive' },
+      period: cdk.Duration.hours(25),
+      statistic: 'Sum',
+    });
+
+    const backupMissingAlarm = new cloudwatch.Alarm(this, 'BackupMissingAlarm', {
+      alarmName: 'gateway-db-backup-missing',
+      alarmDescription:
+        'No successful DB backup reported in the last 25 hours. ' +
+        'Check the gateway node backup cron job and CloudWatch Logs.',
+      metric: backupSuccessMetric,
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    });
+
+    backupMissingAlarm.addAlarmAction(new cw_actions.SnsAction(backupAlertTopic));
+
+    // -----------------------------------------------------------------------
     // Outputs
     // -----------------------------------------------------------------------
+    new cdk.CfnOutput(this, 'BackupAlertTopicArn', {
+      value: backupAlertTopic.topicArn,
+      description: 'SNS topic ARN for DB backup failure alerts (subscribe to receive notifications)',
+    });
     new cdk.CfnOutput(this, 'ArtifactBucketName', {
       value: this.artifactBucket.bucketName,
       description: 'S3 bucket for bootstrap artifacts',

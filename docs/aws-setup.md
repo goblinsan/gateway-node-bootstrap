@@ -51,14 +51,16 @@ Save the `ControlServiceApiUrl` — nodes need it to complete enrollment.
 
 | Resource | Name / Pattern | Purpose |
 |---|---|---|
-| KMS key | (auto-generated) | Encrypts S3 objects, DynamoDB table, and Secrets Manager secrets |
-| S3 bucket | `gateway-node-bootstrap-artifacts-<ACCOUNT>-<REGION>` | Stores compose bundles, systemd units, and manifest JSON |
+| KMS key | (auto-generated) | Encrypts S3 objects, DynamoDB table, Secrets Manager secrets, and DB backup DEKs |
+| S3 bucket | `gateway-node-bootstrap-artifacts-<ACCOUNT>-<REGION>` | Stores compose bundles, systemd units, manifest JSON, and encrypted DB backups |
 | DynamoDB table | `gateway-node-enrollment` | Enrollment records, heartbeat state, last-applied revision |
 | SSM Parameter | `/gateway/bootstrap/manifest-s3-uri` | S3 URI of the current desired-state manifest |
 | Secrets Manager secret | `/gateway/bootstrap/example-node-secret` | Placeholder — replace with real node secrets using the `/gateway/…` prefix |
-| IAM role | `gateway-node-agent` | Instance profile role for EC2 nodes; grants minimal read access |
+| IAM role | `gateway-node-agent` | Instance profile role for EC2 nodes; grants minimal read access plus backup write |
 | Lambda × 4 | `EnrollFunction`, `ActivateFunction`, `ManifestFunction`, `HeartbeatFunction` | Control-service API handlers |
 | API Gateway | `gateway-node-bootstrap-api` (stage `v1`) | REST API exposing the four endpoints |
+| CloudWatch alarm | `gateway-db-backup-missing` | Fires when no successful DB backup is reported in 25 hours |
+| SNS topic | `gateway-db-backup-alerts` | Receives backup failure notifications; subscribe an email/PagerDuty endpoint |
 
 ---
 
@@ -76,6 +78,8 @@ The IAM principal used to run `cdk deploy` needs, at minimum:
 - `lambda:*`
 - `apigateway:*`
 - `logs:*` (CloudWatch Logs for Lambda)
+- `cloudwatch:*` (backup monitoring alarm)
+- `sns:*` (backup alert topic)
 
 Using `AdministratorAccess` is acceptable for initial setup.  Scope it down
 after the first successful deploy.
@@ -226,3 +230,20 @@ Reference the secret in your manifest's `secretRefs` array:
 - Any file that contains real credentials
 
 See `docs/enrollment-trust-model.md` for the full trust boundary model.
+
+---
+
+## Encrypted DB backup and restore
+
+The node agent includes a backup job (`db-backup.ts`) that creates an
+encrypted Postgres dump of the `gateway_sensitive` schema and uploads it to
+the artifact S3 bucket under `backups/postgres/`.  A matching restore script
+(`db-restore.ts`) and an end-to-end drill script (`db-restore-drill.ts`) are
+also provided.
+
+See [`docs/db-backup-restore.md`](db-backup-restore.md) for:
+- Postgres schema and role setup
+- Scheduling the daily backup cron job
+- Running a restore
+- Running the end-to-end restore drill
+- Configuring backup failure alert subscriptions
