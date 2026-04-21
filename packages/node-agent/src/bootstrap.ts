@@ -1,7 +1,8 @@
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { NodeManifest } from '@gateway-node-bootstrap/manifest-types';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -9,12 +10,102 @@ import * as path from 'path';
 const SSM_MANIFEST_PARAM = '/gateway/bootstrap/manifest-s3-uri';
 const SUPPORTED_MANIFEST_VERSIONS: NodeManifest['manifestVersion'][] = ['1'];
 
+/** Path to the on-disk state file that persists the last-applied manifest revision. */
+const STATE_FILE = '/opt/gateway/.bootstrap-state.json';
+
+/** Persisted record of the last successfully applied manifest. */
+interface BootstrapState {
+  revision: string;
+  appliedAt: string;
+  role: string;
+  profileName: string;
+  composeBundleNames: string[];
+  systemdUnitNames: string[];
+}
+
 /**
  * Returns the control service base URL from the environment, or undefined if
  * not configured.  Trailing slashes are stripped.
  */
 function getControlServiceUrl(): string | undefined {
   return process.env.GATEWAY_CONTROL_SERVICE_URL?.replace(/\/$/, '');
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap state — persists last-applied revision for idempotent re-apply
+// ---------------------------------------------------------------------------
+
+/** Loads the saved bootstrap state from disk, or returns null if none exists. */
+function loadBootstrapState(): BootstrapState | null {
+  try {
+    const data = fs.readFileSync(STATE_FILE, 'utf-8');
+    return JSON.parse(data) as BootstrapState;
+  } catch {
+    return null;
+  }
+}
+
+/** Saves the current manifest as the applied state to disk. */
+function saveBootstrapState(manifest: NodeManifest): void {
+  const state: BootstrapState = {
+    revision: manifest.revision,
+    appliedAt: new Date().toISOString(),
+    role: manifest.role,
+    profileName: manifest.profileName,
+    composeBundleNames: manifest.composeBundles.map((b) => b.name),
+    systemdUnitNames: manifest.systemdUnits.map((u) => u.unitName),
+  };
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+    console.log(`[bootstrap] State saved to ${STATE_FILE}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[bootstrap] Failed to save state file: ${msg}`);
+  }
+}
+
+/**
+ * Computes the diff between the previously applied state and the incoming
+ * manifest.  Returns whether a revision change occurred and a list of
+ * human-readable change descriptions.
+ */
+function computeManifestDiff(
+  previous: BootstrapState | null,
+  manifest: NodeManifest
+): { changed: boolean; details: string[] } {
+  if (!previous) {
+    return { changed: true, details: ['No previous state — fresh bootstrap'] };
+  }
+
+  const details: string[] = [];
+
+  if (previous.revision !== manifest.revision) {
+    details.push(`Revision changed: ${previous.revision} → ${manifest.revision}`);
+  }
+
+  const prevBundles = new Set(previous.composeBundleNames);
+  const curBundles = new Set(manifest.composeBundles.map((b) => b.name));
+  for (const b of curBundles) {
+    if (!prevBundles.has(b)) details.push(`New compose bundle: ${b}`);
+  }
+  for (const b of prevBundles) {
+    if (!curBundles.has(b)) details.push(`Removed compose bundle: ${b}`);
+  }
+
+  const prevUnits = new Set(previous.systemdUnitNames);
+  const curUnits = new Set(manifest.systemdUnits.map((u) => u.unitName));
+  for (const u of curUnits) {
+    if (!prevUnits.has(u)) details.push(`New systemd unit: ${u}`);
+  }
+  for (const u of prevUnits) {
+    if (!curUnits.has(u)) details.push(`Removed systemd unit: ${u}`);
+  }
+
+  return {
+    changed: previous.revision !== manifest.revision,
+    details,
+  };
 }
 
 /**
@@ -143,13 +234,213 @@ function verifySha256(buf: Buffer, expected: string, label: string): void {
   }
 }
 
-/** Installs system packages listed in the manifest. */
+// ---------------------------------------------------------------------------
+// Host provisioning (Issue #13)
+// ---------------------------------------------------------------------------
+
+/**
+ * Ensures the host has Docker CE and the Docker Compose plugin installed.
+ * Targets Debian/Ubuntu (apt-get).  On non-apt systems the step is skipped
+ * with a warning so operators can pre-install Docker themselves.
+ */
+function provisionHost(): void {
+  // Only apt-based distros are supported in v1
+  try {
+    execSync('which apt-get', { stdio: 'pipe' });
+  } catch {
+    console.log(
+      '[bootstrap] apt-get not found — skipping Docker installation ' +
+        '(pre-install Docker manually on non-Debian/Ubuntu hosts)'
+    );
+    return;
+  }
+
+  // Check whether Docker is already installed
+  let dockerInstalled = false;
+  try {
+    execSync('docker --version', { stdio: 'pipe' });
+    dockerInstalled = true;
+    console.log('[bootstrap] Docker is already installed');
+  } catch {
+    // Will install below
+  }
+
+  if (!dockerInstalled) {
+    console.log('[bootstrap] Installing Docker CE from the official apt repository');
+    // Install Docker CE using the official upstream apt repository.
+    // This follows https://docs.docker.com/engine/install/ubuntu/ and pins to
+    // the "stable" channel — the latest stable release from Docker, Inc.
+    execSync(
+      'apt-get update -qq && ' +
+        'apt-get install -y ca-certificates curl gnupg && ' +
+        'install -m 0755 -d /etc/apt/keyrings && ' +
+        'curl -fsSL https://download.docker.com/linux/ubuntu/gpg | ' +
+        'gpg --dearmor -o /etc/apt/keyrings/docker.gpg && ' +
+        'chmod a+r /etc/apt/keyrings/docker.gpg && ' +
+        '. /etc/os-release && ' +
+        'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ' +
+        'https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" ' +
+        '| tee /etc/apt/sources.list.d/docker.list > /dev/null && ' +
+        'apt-get update -qq && ' +
+        'apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin',
+      { stdio: 'inherit' }
+    );
+    return;
+  }
+
+  // Docker is present — ensure the Compose plugin is available too
+  try {
+    execSync('docker compose version', { stdio: 'pipe' });
+    console.log('[bootstrap] Docker Compose plugin is available');
+  } catch {
+    console.log('[bootstrap] Installing docker-compose-plugin');
+    execSync('apt-get install -y docker-compose-plugin', { stdio: 'inherit' });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Package installation (Issue #13 — idempotency, Issue #12 — prerequisites)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates a Debian package name.  Debian policy requires names to match
+ * [a-z0-9][a-z0-9+\-.]+.  We accept a slightly broader set that also allows
+ * uppercase letters (as some third-party packages use them) while rejecting
+ * characters that have special meaning in shell commands.
+ */
+function validatePackageName(name: string): void {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9+\-.]*$/.test(name)) {
+    throw new Error(`Invalid package name: '${name}'`);
+  }
+}
+
+/** Returns the installed version of a Debian package, or undefined if not installed. */
+function getInstalledVersion(name: string): string | undefined {
+  validatePackageName(name);
+  try {
+    const output = execSync(
+      `dpkg-query -W -f='\${db:Status-Status} \${Version}' '${name}' 2>/dev/null`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+    // Expected format: "installed 1.2.3-4" or "not-installed "
+    const spaceIdx = output.indexOf(' ');
+    if (spaceIdx === -1) return undefined;
+    const status = output.slice(0, spaceIdx);
+    const version = output.slice(spaceIdx + 1).trim();
+    return status === 'installed' && version ? version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Returns true when the installed version satisfies the minimum requirement
+ * (using dpkg version comparison semantics).
+ */
+function isVersionSatisfied(installed: string, minVersion: string): boolean {
+  try {
+    execFileSync('dpkg', ['--compare-versions', installed, 'ge', minVersion], {
+      stdio: 'pipe',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Installs system packages listed in the manifest, skipping those already present. */
 function installPackages(packages: NodeManifest['runtimePackages']): void {
   if (packages.length === 0) return;
-  const names = packages.map((p) => p.name).join(' ');
-  console.log(`[bootstrap] Installing packages: ${names}`);
-  execSync(`apt-get install -y ${names}`, { stdio: 'inherit' });
+
+  const toInstall: string[] = [];
+  for (const pkg of packages) {
+    validatePackageName(pkg.name);
+    const installedVersion = getInstalledVersion(pkg.name);
+    if (installedVersion === undefined) {
+      console.log(`[bootstrap] Package ${pkg.name}: not installed`);
+      toInstall.push(pkg.name);
+    } else if (pkg.minVersion && !isVersionSatisfied(installedVersion, pkg.minVersion)) {
+      console.log(
+        `[bootstrap] Package ${pkg.name}: installed=${installedVersion}, ` +
+          `need>=${pkg.minVersion} — will upgrade`
+      );
+      toInstall.push(pkg.name);
+    } else {
+      console.log(
+        `[bootstrap] Package ${pkg.name}: ${installedVersion} already installed — skipping`
+      );
+    }
+  }
+
+  if (toInstall.length === 0) {
+    console.log('[bootstrap] All runtime packages already installed');
+    return;
+  }
+
+  console.log(`[bootstrap] Installing packages: ${toInstall.join(' ')}`);
+  execFileSync('apt-get', ['install', '-y', ...toInstall], { stdio: 'inherit' });
 }
+
+// ---------------------------------------------------------------------------
+// Secret resolution (Issue #12, #14)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches secret values from AWS Secrets Manager for each SecretRef in the
+ * manifest and returns them as a map of env-var name → value.
+ *
+ * The env-var key is derived from the secret path by stripping the leading
+ * slash, replacing all remaining slashes and hyphens with underscores, and
+ * upper-casing the result.  Example: "/gateway/prod/api-key" → "GATEWAY_PROD_API_KEY".
+ *
+ * An error is raised if two different paths would produce the same env-var key,
+ * preventing silent overwrites.
+ *
+ * Secret paths are logged to aid debugging; values are never logged.
+ * The trust model relies on CloudWatch log filtering to suppress any paths
+ * that match the /gateway/… prefix pattern.
+ */
+async function resolveSecrets(secretRefs: string[]): Promise<Record<string, string>> {
+  if (secretRefs.length === 0) return {};
+  const sm = new SecretsManagerClient({});
+  const resolved: Record<string, string> = {};
+  // Track which original ref produced each key so we can detect collisions
+  const keyToRef: Record<string, string> = {};
+  for (const ref of secretRefs) {
+    console.log(`[bootstrap] Resolving secret: ${ref}`);
+    const resp = await sm.send(new GetSecretValueCommand({ SecretId: ref }));
+    const value = resp.SecretString;
+    if (value === undefined || value === null) {
+      throw new Error(`Secret '${ref}' has no string value in Secrets Manager`);
+    }
+    // Derive a safe env-var key from the secret path
+    const envKey = ref.replace(/^\//, '').replace(/[/-]/g, '_').toUpperCase();
+    if (keyToRef[envKey] !== undefined && keyToRef[envKey] !== ref) {
+      throw new Error(
+        `Secret key collision: both '${keyToRef[envKey]}' and '${ref}' map to env var '${envKey}'`
+      );
+    }
+    keyToRef[envKey] = ref;
+    resolved[envKey] = value;
+  }
+  return resolved;
+}
+
+/**
+ * Writes resolved secrets to a Docker Compose–compatible .env file at
+ * <dir>/.env with mode 0600.  Existing contents are replaced.
+ */
+function writeEnvFile(dir: string, secrets: Record<string, string>): void {
+  const lines = Object.entries(secrets).map(([k, v]) => `${k}=${v}`);
+  const content = lines.join('\n') + (lines.length > 0 ? '\n' : '');
+  const dest = path.join(dir, '.env');
+  fs.writeFileSync(dest, content, { mode: 0o600 });
+  console.log(`[bootstrap] Wrote .env file: ${dest} (${lines.length} variable(s))`);
+}
+
+// ---------------------------------------------------------------------------
+// Compose bundle application (Issues #14, #15)
+// ---------------------------------------------------------------------------
 
 /** Downloads and applies a Docker Compose bundle. */
 async function applyComposeBundle(
@@ -163,7 +454,20 @@ async function applyComposeBundle(
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, 'docker-compose.yml');
   fs.writeFileSync(dest, raw);
-  execSync(`docker compose -f ${dest} up -d --remove-orphans`, {
+
+  // Resolve referenced secrets and render the .env file (Issue #14)
+  if (bundle.secretRefs.length > 0) {
+    const secrets = await resolveSecrets(bundle.secretRefs);
+    writeEnvFile(dir, secrets);
+  }
+
+  // Pull pinned images before starting services so failures surface early (Issue #15)
+  for (const imageRef of bundle.images) {
+    console.log(`[bootstrap] Pulling image: ${imageRef}`);
+    execFileSync('docker', ['pull', imageRef], { stdio: 'inherit' });
+  }
+
+  execFileSync('docker', ['compose', '-f', dest, 'up', '-d', '--remove-orphans'], {
     stdio: 'inherit',
   });
 }
@@ -291,23 +595,41 @@ export async function bootstrap(): Promise<void> {
       `profile="${manifest.profileName}" revision=${manifest.revision}`
   );
 
-  // 4. Install runtime packages
+  // Load previous state and compute diff (Issue #16 — idempotent re-apply)
+  const previousState = loadBootstrapState();
+  const diff = computeManifestDiff(previousState, manifest);
+
+  if (!diff.changed && previousState) {
+    console.log(
+      `[bootstrap] Manifest revision ${manifest.revision} matches last-applied state — ` +
+        're-verifying desired state'
+    );
+  } else {
+    for (const detail of diff.details) {
+      console.log(`[bootstrap] Change detected: ${detail}`);
+    }
+  }
+
+  // 4. Provision the host: install Docker CE and docker-compose-plugin (Issue #13)
+  provisionHost();
+
+  // 5. Install runtime packages (idempotent — skips already-satisfied packages)
   installPackages(manifest.runtimePackages);
 
-  // 5. Apply compose bundles
+  // 6. Apply compose bundles (fetches compose file, resolves secrets, pulls images)
   for (const bundle of manifest.composeBundles) {
     await applyComposeBundle(bundle);
   }
 
-  // 6. Apply systemd units
+  // 7. Apply systemd units
   for (const unit of manifest.systemdUnits) {
     await applySystemdUnit(unit);
   }
 
-  // 7. Run health checks
+  // 8. Run health checks
   const failures = await runHealthChecks(manifest.healthChecks);
 
-  // 8. Report heartbeat if the control service is configured
+  // 9. Report heartbeat if the control service is configured
   if (controlServiceUrl && instanceId) {
     const healthCheckResults = manifest.healthChecks.map((check, i) => ({
       name: `${check.type}-${i}`,
@@ -321,6 +643,9 @@ export async function bootstrap(): Promise<void> {
       healthCheckResults
     );
   }
+
+  // 10. Persist bootstrap state for idempotent re-apply on future runs (Issue #16)
+  saveBootstrapState(manifest);
 
   if (failures.length > 0) {
     throw new Error(

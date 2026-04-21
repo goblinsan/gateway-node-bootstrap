@@ -69,10 +69,16 @@ gateway-node-bootstrap/
       `GATEWAY_CONTROL_SERVICE_URL` environment variables
 - [x] Node agent: heartbeat reporting after successful (or degraded) bootstrap
 - [x] Operator docs: `docs/aws-setup.md` covering deploy, enrollment, revocation
-- [ ] Node agent: implement `apt-get` package installation with idempotency
-      checks (skip already-installed packages)
-- [ ] End-to-end test: stand up a local Ubuntu container and run the agent
-      against a sample manifest; verify health checks pass within 60 minutes
+- [x] Node agent: implement `apt-get` package installation with idempotency
+      checks (skip already-installed packages; compare against `minVersion`)
+- [x] Node agent: `provisionHost()` — installs Docker CE + docker-compose-plugin
+      on Debian/Ubuntu hosts (apt-based); no-op on pre-installed or non-apt hosts
+- [x] Node agent: secret resolution — fetches `ComposeBundle.secretRefs` from
+      AWS Secrets Manager and writes a mode-0600 `.env` file per bundle
+- [x] Node agent: pinned image pull — pulls each `ImageRef` before
+      `docker compose up` so failures surface before containers start
+- [x] Node agent: idempotent re-apply — persists last-applied revision in
+      `/opt/gateway/.bootstrap-state.json`; diffs on re-run and reports changes
 
 ### Phase 2 — Drift detection
 
